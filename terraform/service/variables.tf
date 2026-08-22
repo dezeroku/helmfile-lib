@@ -106,8 +106,8 @@ variable "oidc" {
   type = object({
     redirect_uris    = list(string)
     group_ids        = list(string)
-    id_token_ttl     = optional(number, 2400)
-    access_token_ttl = optional(number, 7200)
+    id_token_ttl     = optional(number, 43200)
+    access_token_ttl = optional(number, 43200)
     client_name      = optional(string) # defaults to var.name
     assignment_name  = optional(string) # defaults to client_name
   })
