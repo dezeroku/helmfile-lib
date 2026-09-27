@@ -62,6 +62,14 @@ templates:
       - ../lib/values/vault-auth.yaml.gotmpl
       - ../lib/values/oidc-secret.yaml.gotmpl
       - ../lib/values/filebrowser.yaml.gotmpl
+  # A CloudNativePG Postgres cluster for the release, `<release>-db`, backed up
+  # to the object store named in `cluster.postgres` - see
+  # postgres.yaml.gotmpl for the `postgres` options (size, database, recover)
+  # under `releaseConfig`.
+  postgres:
+    values:
+      - ../lib/values/vault-auth.yaml.gotmpl
+      - ../lib/values/postgres.yaml.gotmpl
   # MeTube, named after itself throughout so it can either be a release of its
   # own or ride along in one that already runs something else. Needs a route
   # pointing at its service - see metube.yaml.gotmpl.

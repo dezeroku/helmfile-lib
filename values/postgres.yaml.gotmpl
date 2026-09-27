@@ -1,0 +1,212 @@
+---
+# A CloudNativePG Postgres cluster for the release, plus everything its backups
+# need: the barman object store on both sides of the cluster, the nightly
+# ScheduledBackup, and the object store credentials out of Vault. Consumed via
+# the `postgres` helmfile template, which also pulls in vault-auth.yaml.gotmpl
+# for the vaultAuthRef below.
+#
+# The cluster is called `<release>-db`, so the application reaches it through
+# the secret CloudNativePG writes for the owner role, `<release>-db-app`:
+#
+#   env:
+#     PG_HOST:
+#       valueFrom:
+#         secretKeyRef:
+#           name: <release>-db-app
+#           key: host    # and user, password, dbname, port, uri, jdbc-uri
+#
+# Where the backups go is a property of the cluster, not of the release - see
+# `cluster.postgres.*` in lib/cluster-defaults.yaml.gotmpl. With no object
+# store configured there this block emits the Postgres cluster alone.
+#
+# Driven by the release's `postgres` map under `releaseConfig` in environment
+# values (see the `environments:` part of the helmfile):
+#
+#   size            - size of the data volume                   (default: 1Gi)
+#   instances       - instances in the cluster                    (default: 1)
+#   image           - `repository` and `tag` of the image to run. Either half
+#                     on its own is enough; the other keeps following the
+#                     cluster-wide one:
+#
+#                       postgres:
+#                         image:
+#                           tag: "17.6"    # quoted, or YAML makes it a number
+#
+#                                            (default: cluster.postgres.image)
+#   database        - database to create, owned by a role of the same name.
+#                     Without it CloudNativePG creates its own `app`/`app`
+#                                                              (default: none)
+#   superuser       - true: that role is a superuser. Needs `database`, as
+#                     that is the role it names                (default: false)
+#
+# The four WAL knobs below keep the data volume from filling up with WAL the
+# bucket already holds and a single-instance cluster will never read again:
+#
+#   walKeepSize     - WAL kept in pg_wal for a replica to catch up from, on
+#                     top of what the current checkpoint needs (default: 128MB)
+#   minWalSize      - size the WAL directory is recycled down to (default: 32MB)
+#   maxWalSize      - size that triggers a checkpoint           (default: 256MB)
+#   archiveTimeout  - how long a partial segment waits before it is closed and
+#                     archived, which bounds what a restore loses (default: 1h)
+#
+#   schedule        - six-field cron schedule for the base backup
+#                                     (default: cluster.postgres.backup.schedule)
+#   retentionPolicy - how long backups are kept
+#                              (default: cluster.postgres.backup.retentionPolicy)
+#   bucket          - bucket the backups land in         (default: <release>)
+#   serverName      - the cluster's own directory in that bucket. barman
+#                     refuses to write into one that already holds another
+#                     cluster's history, so a rebuilt cluster needs a fresh
+#                     name - `<release>-v2`, and so on
+#                               (default: CloudNativePG's own, i.e. <release>-db)
+#   recover         - true: bootstrap by restoring `recoverFrom` from the
+#                     bucket, instead of starting empty. Independent of
+#                     `database`, which only names what ends up in there either
+#                     way. Only ever read when the cluster is first created, so
+#                     it can stay on after a restore - and has to, as long as
+#                     this release's cluster is the restored one
+#                                                              (default: false)
+#   recoverFrom     - serverName to restore from      (default: the serverName
+#                     above, i.e. this cluster's own history)
+#
+# Major version upgrades are a migration, not a values change: bump `image`
+# only together with whatever CloudNativePG asks for at the time.
+#
+# Anything else the Cluster should say goes into the release's own values file
+# under the same `rawResources.db.manifest.spec` key, which is merged on top of
+# what's here.
+#
+# Labels:
+#   chartRoot  - see base.yaml.gotmpl
+
+# The barman object store, shared by the backup side and - when restoring - by
+# the external cluster the restore reads. Takes the serverName to point at, as
+# the two differ when recovering from another cluster's history.
+{{- define "postgres.objectStore" }}
+{{- $cfg := .cfg }}
+{{- $release := .release }}
+{{- $backup := .backup }}
+destinationPath: s3://{{ $cfg | get "bucket" $release }}/
+endpointURL: {{ $backup.endpointURL }}
+{{- with .serverName }}
+serverName: {{ . }}
+{{- end }}
+s3Credentials:
+  accessKeyId:
+    name: {{ $release }}-cnpg-backup-s3-secret
+    key: ACCESS_KEY_ID
+  secretAccessKey:
+    name: {{ $release }}-cnpg-backup-s3-secret
+    key: ACCESS_SECRET_KEY
+{{- end }}
+
+{{- define "postgres.body" }}
+{{- $release := .Release.Name }}
+{{- $cfg := .Values | get (printf "releaseConfig.%s.postgres" $release) dict }}
+{{- $backup := .Values.cluster.postgres.backup }}
+{{- $backups := ne $backup.endpointURL "" }}
+{{- $clusterImage := .Values.cluster.postgres.image }}
+{{- $image := $cfg | get "image" dict }}
+{{- $database := $cfg | get "database" "" }}
+{{- $serverName := $cfg | get "serverName" "" }}
+{{- $recover := $cfg | get "recover" false }}
+{{- $superuser := $cfg | get "superuser" false }}
+{{- if $recover }}
+{{- $_ := $backup.endpointURL | required (printf "%s: postgres.recover is set, but cluster.postgres.backup.endpointURL is not - there is nothing to restore from" $release) }}
+{{- end }}
+{{- if $superuser }}
+{{- $_ := $database | required (printf "%s: postgres.superuser needs postgres.database - there is no role to grant it to" $release) }}
+{{- end }}
+{{- $store := dict "cfg" $cfg "release" $release "backup" $backup "serverName" $serverName }}
+rawResources:
+  db:
+    manifest:
+      apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      spec:
+        postgresql:
+          parameters:
+            wal_keep_size: {{ $cfg | get "walKeepSize" "128MB" | quote }}
+            min_wal_size: {{ $cfg | get "minWalSize" "32MB" | quote }}
+            max_wal_size: {{ $cfg | get "maxWalSize" "256MB" | quote }}
+            archive_timeout: {{ $cfg | get "archiveTimeout" "1h" | quote }}
+        instances: {{ $cfg | get "instances" 1 }}
+        imageName: {{ $image | get "repository" $clusterImage.repository }}:{{ $image | get "tag" $clusterImage.tag }}
+        storage:
+          size: {{ $cfg | get "size" "1Gi" }}
+{{- if or $recover $database }}
+        bootstrap:
+{{- if $recover }}
+          recovery:
+            source: {{ $release }}-backup
+{{- else }}
+          initdb:
+{{- end }}
+{{- if $database }}
+            database: {{ $database }}
+            owner: {{ $database }}
+{{- end }}
+{{- end }}
+{{- if $superuser }}
+        managed:
+          roles:
+            - name: {{ $database }}
+              superuser: true
+              login: true
+{{- end }}
+{{- if $recover }}
+        externalClusters:
+          - name: {{ $release }}-backup
+            barmanObjectStore:
+{{ include "postgres.objectStore" (merge (dict "serverName" ($cfg | get "recoverFrom" $serverName)) $store) | trim | indent 14 }}
+{{- end }}
+{{- if $backups }}
+        backup:
+          barmanObjectStore:
+{{ include "postgres.objectStore" $store | trim | indent 12 }}
+            wal:
+              compression: gzip
+          retentionPolicy: {{ $cfg | get "retentionPolicy" $backup.retentionPolicy | quote }}
+  db-backup:
+    manifest:
+      apiVersion: postgresql.cnpg.io/v1
+      kind: ScheduledBackup
+      spec:
+        schedule: {{ $cfg | get "schedule" $backup.schedule | quote }}
+        backupOwnerReference: self
+        cluster:
+          name: {{ $release }}-db
+  cnpg-backup-s3-secret:
+    manifest:
+      apiVersion: secrets.hashicorp.com/v1beta1
+      kind: VaultStaticSecret
+      spec:
+        type: kv-v2
+        mount: {{ .Values.cluster.vault.secretsMount }}
+        path: {{ $backup.credentialsPath | required (printf "%s: cluster.postgres.backup.credentialsPath is unset - see lib/cluster-defaults.yaml.gotmpl" $release) }}
+        destination:
+          name: {{ $release }}-cnpg-backup-s3-secret
+          create: true
+          transformation:
+            excludes:
+              - .*
+            templates:
+              ACCESS_KEY_ID:
+                text: |-
+                  {{ "{{`{{" }}.Secrets.username{{ "}}`}}" }}
+              ACCESS_SECRET_KEY:
+                text: |-
+                  {{ "{{`{{" }}.Secrets.password{{ "}}`}}" }}
+        vaultAuthRef: {{ $release }}-vault-auth
+{{- end }}
+{{- end }}
+{{- $body := include "postgres.body" . | trim }}
+{{- $root := .Release.Labels | get "chartRoot" "" }}
+{{- if $body }}
+{{- if $root }}
+{{ $root }}:
+{{ $body | indent 2 }}
+{{- else }}
+{{ $body }}
+{{- end }}
+{{- end }}

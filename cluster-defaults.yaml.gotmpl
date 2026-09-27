@@ -33,6 +33,29 @@ cluster:
   # filebrowser user database. Empty means the cluster's default class.
   storageClass: ""
 
+  # Where the CloudNativePG clusters of postgres.yaml.gotmpl ship their base
+  # backups and WAL. No useful default - a repo that wants database backups
+  # points this at its own object store.
+  postgres:
+    # Image every cluster runs, unless the release overrides either half of it.
+    # Bumping the major version - here or per release - is a migration, not a
+    # default; see the block's header.
+    image:
+      repository: ghcr.io/cloudnative-pg/postgresql
+      # Quoted, or YAML reads a two-part version as a number.
+      tag: "18.6"
+    backup:
+      # S3 API endpoint of the object store. Empty disables backups entirely:
+      # no barmanObjectStore, no ScheduledBackup, no credentials.
+      endpointURL: ""
+      # kv-v2 path, in `vault.secretsMount` below, of the object store's
+      # credentials - read as `username` / `password`.
+      credentialsPath: ""
+      # Six-field cron schedule for the base backup, and how long backups are
+      # kept. Defaults to one per day. Overridable per release.
+      schedule: "0 0 1 * * *"
+      retentionPolicy: "14d"
+
   vault:
     # Kubernetes auth mount the VaultAuth of every release binds to. Named
     # after the cluster, so there is no useful default - set it in the repo's
