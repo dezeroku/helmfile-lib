@@ -120,7 +120,7 @@ service:
       http:
         port: 80
 configMaps:
-  config:
+  filebrowser-config:
     enabled: true
     data:
       config.yaml: |
@@ -138,10 +138,10 @@ persistence:
       filebrowser:
         main:
           - path: /database
-  config:
+  filebrowser-config:
     enabled: true
     type: configMap
-    identifier: config
+    identifier: filebrowser-config
     advancedMounts:
       filebrowser:
         main:
